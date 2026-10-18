@@ -55,8 +55,16 @@ def months_in(q):
     qm = re.findall(r"\bq([1-4])\b", q)
     for x in qm:
         found.update(range(3 * int(x) - 2, 3 * int(x) + 1))
-    if "first half" in q or "h1" in q:
+    if "first half" in q or re.search(r"\bh1\b", q):
         found.update(range(1, 7))
+    # ranges like "between January and March", "from Feb to Apr", "Jan-Mar"
+    names = "|".join(list(MONTHS) + [m[:3] for m in MONTHS])
+    m = re.search(r"\b(" + names + r")\b\s*(?:20\d\d)?\s*(?:to|through|thru|until|till|and|-|–|—)\s*\b(" + names + r")\b", q)
+    if m and re.search(r"between|from|through|thru|until|till|-|–|—|\bto\b", q):
+        a = MONTHS.get(m.group(1)) or MONTHS[[k for k in MONTHS if k.startswith(m.group(1))][0]]
+        b = MONTHS.get(m.group(2)) or MONTHS[[k for k in MONTHS if k.startswith(m.group(2))][0]]
+        if a <= b:
+            found.update(range(a, b + 1))
     return found
 
 
@@ -85,10 +93,11 @@ def answer(question):
     refund = "refund" in q
     void = re.search(r"\bvoid", q)
     count = re.search(r"how many|number of|count of|\bcount\b", q)
-    units = re.search(r"\bunits?\b|quantity|\bqty\b|items sold", q)
+    units = re.search(r"\bunits?\b|quantity|\bqty\b|items sold|pieces", q)
     avg = re.search(r"average|mean|\baov\b", q)
-    top = re.search(r"\b(top|best|most|highest|largest|biggest|leading|maximum|max)\b", q)
-    low = re.search(r"\b(least|lowest|worst|fewest|smallest|minimum|min)\b", q)
+    qr = re.sub(r"at least|at most|at the most|least one", " ", q)  # avoid false ranking words
+    top = re.search(r"\b(top|best|most|highest|largest|biggest|leading|maximum|max|greatest)\b", qr)
+    low = re.search(r"\b(least|lowest|worst|fewest|smallest|minimum|min)\b", qr)
 
     if refund:
         sel = [r for r in sel if r["status"] == "refunded"]
@@ -105,6 +114,12 @@ def answer(question):
         if count and not re.search(r"revenue|amount|value|usd|\$", q):
             return len(rs)
         return sum(r["usd"] for r in rs)
+
+    # distinct counts: "how many (different|distinct|unique) customers/products/regions"
+    if count:
+        for key, word in (("customer", "customer"), ("product", "product"), ("region", "region")):
+            if re.search(r"\b" + word + r"s\b", q) or re.search(r"(different|distinct|unique)\s+\w*\s*" + word, q):
+                return len({r[key] for r in sel})
 
     for key, word in (("product", "product"), ("customer", "customer"), ("region", "region")):
         if re.search(r"\b" + word, q) and (top or low or re.search(r"\bwhich\b|\bwho\b", q)) and not (key == "product" and prod) and not (key == "customer" and cust) and not (key == "region" and reg):
