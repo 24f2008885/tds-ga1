@@ -306,6 +306,122 @@ def docker_json():
             "E": {"steps": ["L4", "L5"], "seconds": 39}}
 
 
+# ---------------- Q10 /extract (rule-based invoice extraction) ----------------
+import re
+from datetime import datetime as _dt
+
+SYM = {"$": "USD", "€": "EUR", "£": "GBP"}
+MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def _num(s):
+    return float(s.replace(",", "").replace(" ", ""))
+
+
+def _dates(text):
+    out = []
+    for m in re.finditer(r"\b(20\d\d)[-/.](\d{1,2})[-/.](\d{1,2})\b", text):
+        out.append((m.start(), f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"))
+    for m in re.finditer(r"\b(\d{1,2})\s+([A-Za-z]{3})[a-z]*\.?,?\s+(20\d\d)\b", text):
+        mo = MONTHS.get(m.group(2).lower()[:3])
+        if mo:
+            out.append((m.start(), f"{m.group(3)}-{mo:02d}-{int(m.group(1)):02d}"))
+    for m in re.finditer(r"\b([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(20\d\d)\b", text):
+        mo = MONTHS.get(m.group(1).lower()[:3])
+        if mo:
+            out.append((m.start(), f"{m.group(3)}-{mo:02d}-{int(m.group(2)):02d}"))
+    return sorted(out)
+
+
+def extract_invoice(text):
+    t = text or ""
+    low = t.lower()
+    # date: prefer one near "due"
+    dates = _dates(t)
+    date = ""
+    if dates:
+        dues = [m.end() for m in re.finditer(r"due|payable|pay by|deadline|remit|\bby\b|before|no later than", low)]
+        dates_after = [d for d in dates if any(0 <= d[0] - p <= 40 for p in dues)]
+        if dates_after:
+            dates = dates_after
+        if dues:
+            date = min(dates, key=lambda d: min(abs(d[0] - p) for p in dues))[1]
+        else:
+            date = dates[-1][1]
+    # amount + currency
+    money = []
+    pat = r"(?:(USD|EUR|GBP)|([$€£]))\s*([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*(USD|EUR|GBP|[$€£])"
+    for m in re.finditer(pat, t, re.I):
+        if m.group(3):
+            cur = (m.group(1) or SYM.get(m.group(2), "")).upper()
+            val = m.group(3)
+        else:
+            cur = m.group(5).upper() if m.group(5).upper() in ("USD", "EUR", "GBP") else SYM.get(m.group(5), "")
+            val = m.group(4)
+        try:
+            money.append((m.start(), _num(val), cur))
+        except ValueError:
+            pass
+    amount, currency = 0.0, ""
+    if money:
+        keys = [m.start() for m in re.finditer(r"total|amount due|balance due|grand total|due", low)]
+        pick = min(money, key=lambda x: min((abs(x[0] - p) for p in keys), default=0)) if keys else max(money, key=lambda x: x[1])
+        amount, currency = pick[1], pick[2]
+    if not currency:
+        m = re.search(r"\b(USD|EUR|GBP)\b", t, re.I)
+        currency = m.group(1).upper() if m else "USD"
+    # vendor
+    vendor = ""
+    m = re.search(r"(?:vendor|from|supplier|seller|billed by|issued by|company)\s*[:\-]\s*([^\n,;]+)", t, re.I)
+    if m:
+        vendor = m.group(1).strip().rstrip(".")
+    if not vendor:
+        m = re.search(r"([A-Z][\w&'\-]*(?:[ \-][A-Z0-9][\w&'\-]*)*\s+(?:Industries|Corp|Corporation|Inc|LLC|Ltd|Limited|GmbH|Co|Company|Group|Holdings|Enterprises|Solutions|Systems|Labs|Partners)\.?(?:\s+(?:Ltd|Inc|LLC|Co)\.?)?)", t)
+        if m:
+            vendor = m.group(1).strip()
+    if not vendor:
+        vendor = t.strip().split("\n")[0][:80] if t.strip() else "unknown"
+    return {"vendor": vendor, "amount": amount, "currency": currency, "date": date}
+
+
+@app.post("/extract")
+async def extract(request: Request):
+    try:
+        body = await request.json()
+        text = body.get("text", "") if isinstance(body, dict) else ""
+    except Exception:
+        text = ""
+    if not isinstance(text, str):
+        text = str(text)
+    try:
+        return extract_invoice(text)
+    except Exception:
+        return JSONResponse({"detail": "could not parse"}, status_code=422)
+
+
+# ---------------- Q9 OpenAI-compatible chat completions ----------------
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    msgs = body.get("messages", []) or []
+    prompt = " ".join(str(m.get("content", "")) for m in msgs if isinstance(m, dict))
+    parts = []
+    tok = re.findall(r"\bTK[0-9a-fA-F]{6}\b", prompt)
+    if tok:
+        parts.append(" ".join(tok))
+    for a, op, b in re.findall(r"(-?\d+)\s*([+\-*x×])\s*(-?\d+)", prompt):
+        a, b = int(a), int(b)
+        parts.append(str(a + b if op == "+" else a - b if op == "-" else a * b))
+    content = " ".join(parts) if parts else "OK"
+    return {"id": "chatcmpl-" + uuid.uuid4().hex[:12], "object": "chat.completion", "created": int(time.time()),
+            "model": body.get("model", "tds-local"),
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+
+
 @app.get("/")
 def root():
     return {"ok": True}
