@@ -17,7 +17,10 @@ _cache = {}
 
 
 def _get(path):
-    with urllib.request.urlopen(BASE + "&path=" + path, timeout=20) as r:
+    req = urllib.request.Request(BASE.split("&path=")[0] + "&path=" + path,
+                                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) curl/8.0",
+                                          "Accept": "*/*"})
+    with urllib.request.urlopen(req, timeout=20) as r:
         return r.read().decode()
 
 
